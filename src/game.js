@@ -7,15 +7,21 @@
   const GROUND_Y = 400;       // スタート地点の道の高さ
   const Y_TOP = 230;          // 道の高さの上限（画面上の座標なので小さいほど高い）
   const Y_BOT = 450;          // 道の高さの下限。これより下に落ちたら復帰できない
-  const PLAYER_X = 220;       // プレイヤーの画面上のX座標
+  const HOME_X = 300;         // プレイヤーの基本の画面上のX座標。地上ではここへ戻っていく
+  const RIGHT_LIMIT = W - 160; // これより右には進めない
+  const RETURN_SPEED = 1.5;   // 地上で基本位置へ戻る速さ
   const PIECE_W = 46;
   const PIECE_H = 54;
+  const TOP_APEX = PIECE_H + 8; // 「画面の上まで跳ぶ」ときの最高点（足元のY座標）
   const STEP = 1000 / 60;     // 物理更新は固定60fps
   const BASE_SPEED = 6;
   const MAX_SPEED = 12;
   const SPEED_UP = 0.0004;    // 1px進むごとに増える速度
   const CUT_GRAVITY = 2.4;    // 上昇中にボタンを離したときの重力倍率（小ジャンプ用）
   const FLOAT_GRAVITY = 0.2;  // 浮遊中の重力倍率
+  const GLIDE_FALL = 1.2;     // 滑空中の落下速度の上限
+  const DASH_FRAMES = 14;     // 空中ダッシュの時間
+  const DASH_SPEED = 10;      // 空中ダッシュの速さ（画面に対して）
   const COYOTE_FRAMES = 6;    // 道の端から落ちた直後でもジャンプできる猶予
   const BUFFER_FRAMES = 6;    // 着地直前の先行入力の猶予
   const BOARD_CELL = 48;      // 道（将棋盤）のマス目サイズ
@@ -48,24 +54,20 @@
   }
 
   // ---- ジャンプ性能の計算 ----
-  // ボタンを押しっぱなしで1回跳んだときの滞空フレーム数
-  function airFrames(p) {
-    let y = 0, vy = -p.jumpPower, floatLeft = p.floatFrames, t = 0;
-    while (t < 600) {
-      let g = p.gravity;
-      if (vy > 0 && floatLeft > 0) { g *= FLOAT_GRAVITY; floatLeft--; }
-      vy += g;
-      y += vy;
-      t++;
-      if (y >= 0) break;
-    }
-    return t;
+  // 高さ y0 から地上ジャンプしたときの初速。angle を省略すると駒の通常ジャンプの向き
+  function launch(p, y0, angle) {
+    if (p.jumpTop) return { vx: 0, vy: -Math.sqrt(2 * p.gravity * Math.max(0, y0 - TOP_APEX)) };
+    const a = ((angle !== undefined ? angle : p.jumpAngle || 90) * Math.PI) / 180;
+    return { vx: p.jumpPower * Math.cos(a), vy: -p.jumpPower * Math.sin(a) };
   }
-  function jumpHeight(p) { return (p.jumpPower * p.jumpPower) / (2 * p.gravity); }
-  // ボタンを押しっぱなしで跳んだとき、踏み切りより h だけ高い位置まで落ちてくるフレーム数
+  function jumpHeight(p, y0 = GROUND_Y) {
+    const vy = launch(p, y0).vy;
+    return (vy * vy) / (2 * p.gravity);
+  }
+  // ボタンを押しっぱなしで高さ y0 から跳んだとき、踏み切りより h だけ高い位置まで落ちてくるフレーム数
   // （h が負なら低い位置。届かない高さなら 0）
-  function framesToHeight(p, h) {
-    let y = 0, vy = -p.jumpPower, floatLeft = p.floatFrames, t = 0;
+  function framesToHeight(p, h, y0 = GROUND_Y) {
+    let y = 0, vy = launch(p, y0).vy, floatLeft = p.floatFrames, t = 0;
     while (t < 600) {
       let g = p.gravity;
       if (vy > 0 && floatLeft > 0) { g *= FLOAT_GRAVITY; floatLeft--; }
@@ -76,11 +78,12 @@
     }
     return 0;
   }
+  // ボタンを押しっぱなしで1回跳んだときの滞空フレーム数
+  function airFrames(p) { return framesToHeight(p, 0); }
 
   // ---- 状態 ----
   let state = 'select';  // select | playing | over
   let piece = null;
-  let jumpH = 0;          // 1回のジャンプの高さ（段差の上限に使う）
   let camera = 0;
   let speed = BASE_SPEED;
   let segments = [];
@@ -90,14 +93,16 @@
   let overAt = 0;
   let frame = 0;
 
-  const input = { jumpHeld: false, jumpBuffer: 0 };
+  const input = { jumpHeld: false, jumpBuffer: 0, skillHeld: false, skillBuffer: 0 };
 
   function newPlayer() {
     return {
-      y: GROUND_Y, vy: 0,
+      sx: HOME_X, y: GROUND_Y,  // sx は画面上のX座標、y は足元のY座標
+      vx: 0, vy: 0,             // vx は画面に対する横の速さ
       onGround: true, coyote: 0,
-      jumpsUsed: 0, floatLeft: 0,
-      falling: false, crashed: 0, angle: 0,
+      jumpsUsed: 0, floatLeft: 0, glideLeft: 0,
+      dash: 0, dashUsed: false,
+      falling: false, crashed: 0, outLeft: false, angle: 0,
     };
   }
 
@@ -113,7 +118,9 @@
 
   // 道を1本作る。進むほど坂が多く急になる
   function makeRoad(x, y0, s, diff) {
-    const minRoad = Math.max(140, s * 26);
+    let minRoad = Math.max(140, s * 26);
+    // 跳ぶ距離を調整できない駒は、着地した道でもう一度跳べるよう道を長くする
+    if (piece.jumpTop) minRoad = Math.max(minRoad, framesToHeight(piece, 0, y0) * s);
     const maxRoad = Math.max(minRoad + 40, 560 - diff * 260);
     const w = rand(minRoad, maxRoad);
     let y1 = y0;
@@ -138,7 +145,7 @@
       }
       const cur = last.y1;
       // 段差の上限は駒のジャンプ力で決まり、進むほど大きくなる
-      const upMax = Math.min(jumpH * 0.55, 20 + diff * 110);
+      const upMax = Math.min(jumpHeight(piece, cur) * 0.55, 20 + diff * 110);
       const downMax = 30 + diff * 120;
       let dy = clampY(cur + rand(-upMax, downMax)) - cur;
       // 上り坂の直後に上り段差があると、坂に引っかかって越えられないので下りにする
@@ -148,7 +155,7 @@
       const pHole = 0.3 + diff * 0.45;
       if (r < pHole) {
         // 穴：向こう岸の高さに合わせて、ジャンプで届く幅にする
-        const f = framesToHeight(piece, -dy + WALL_TOL);
+        const f = framesToHeight(piece, -dy + WALL_TOL, cur);
         const lo = 0.35 + diff * 0.2;
         const hi = 0.55 + diff * 0.2;
         segments.push({ type: 'hole', x, w: Math.max(50, f * s * rand(lo, hi)), prevY: cur, nextY: cur + dy });
@@ -159,7 +166,7 @@
         segments.push(makeRoad(x, cur, s, diff));
       }
     }
-    while (segments.length && segments[0].x + segments[0].w < camera - 100) segments.shift();
+    while (segments.length && segments[0].x + segments[0].w < camera - 300) segments.shift();
   }
 
   // ワールド座標 wx の道の高さ（穴なら null）
@@ -172,7 +179,7 @@
 
   // プレイヤーの足元で一番高い道の高さ（足元が全部穴なら null）
   function surfaceUnder() {
-    const cx = camera + PLAYER_X;
+    const cx = camera + player.sx;
     let best = null;
     for (const wx of [cx - PIECE_W / 2 + 6, cx, cx + PIECE_W / 2 - 6]) {
       const y = groundAt(wx);
@@ -184,16 +191,16 @@
   // ---- ゲーム進行 ----
   function startGame(p) {
     piece = p;
-    jumpH = jumpHeight(p);
     best = loadBest(p.id);
     camera = 0;
     speed = BASE_SPEED;
     particles = [];
     player = newPlayer();
     // 最初は長い道から
-    segments = [{ type: 'road', x: -200, w: PLAYER_X + 200 + 700, y0: GROUND_Y, y1: GROUND_Y }];
+    segments = [{ type: 'road', x: -300, w: HOME_X + 300 + 700, y0: GROUND_Y, y1: GROUND_Y }];
     generate();
     input.jumpBuffer = 0;
+    input.skillBuffer = 0;
     state = 'playing';
     selectEl.classList.add('hidden');
     overEl.classList.add('hidden');
@@ -206,7 +213,8 @@
     const dist = Math.floor(camera / 10);
     const isBest = dist > best;
     if (isBest) { best = dist; saveBest(piece.id, dist); }
-    document.getElementById('over-title').textContent = player.crashed ? 'ぶつかった…' : '落ちた…';
+    document.getElementById('over-title').textContent =
+      player.outLeft ? 'はみ出した…' : player.crashed ? 'ぶつかった…' : '落ちた…';
     document.getElementById('over-score').textContent = `${piece.name}　${dist} m`;
     document.getElementById('over-best').textContent = isBest ? '★ 自己ベスト更新！' : `ベスト ${best} m`;
     overEl.classList.remove('hidden');
@@ -223,31 +231,74 @@
     p.crashed = 1;
     p.vy = -6;
     p.onGround = false;
-    puff(PLAYER_X + PIECE_W / 2, p.y - PIECE_H / 2, 12);
+    puff(p.sx, p.y - PIECE_H / 2, 12);
+  }
+
+  function canGroundJump() {
+    const p = player;
+    return !p.falling && !p.crashed && (p.onGround || p.coyote > 0);
+  }
+  function canAirAction() {
+    const p = player;
+    return !p.falling && !p.crashed && !p.onGround && p.coyote === 0;
+  }
+
+  // 地上からのジャンプ。angle を省略すると駒の通常ジャンプ
+  function groundJump(angle) {
+    const p = player;
+    const v = launch(piece, p.y, angle);
+    p.vx = v.vx;
+    p.vy = v.vy;
+    p.jumpsUsed = 1;
+    p.onGround = false;
+    p.coyote = 0;
+    p.floatLeft = piece.floatFrames;
+    p.glideLeft = piece.skill && piece.skill.type === 'glide' ? piece.skill.frames : 0;
+    p.dash = 0;
+    p.dashUsed = false;
+  }
+
+  // その高さのまま横へまっすぐ移動する（dir: 1 で前、-1 で後ろ）
+  function startDash(dir) {
+    const p = player;
+    p.dash = DASH_FRAMES;
+    p.dashUsed = true;
+    p.vx = dir * DASH_SPEED;
+    p.vy = 0;
+    puff(p.sx, p.y - PIECE_H / 2, 6);
   }
 
   function tryJump() {
     const p = player;
-    if (p.falling || p.crashed) return false;
-    if (p.onGround || p.coyote > 0) {
-      p.vy = -piece.jumpPower;
-      p.jumpsUsed = 1;
+    if (canGroundJump()) {
+      groundJump();
+    } else if (!canAirAction()) {
+      return false;
+    } else if (piece.airDash && !p.dashUsed) {
+      startDash(1);
     } else if (p.jumpsUsed < piece.maxJumps) {
       p.vy = -piece.jumpPower * piece.airJumpMul;
       p.jumpsUsed++;
-      puff(PLAYER_X, p.y, 6);
+      p.floatLeft = piece.floatFrames;
+      puff(p.sx, p.y, 6);
     } else {
       return false;
     }
-    p.onGround = false;
-    p.coyote = 0;
-    p.floatLeft = piece.floatFrames;
     return true;
   }
 
-  function useSkill() {
-    if (state !== 'playing' || !piece.skill) return;
-    piece.skill(player);
+  function trySkill() {
+    const sk = piece.skill;
+    if (!sk) return true;
+    if (sk.type === 'angleJump') {
+      if (!canGroundJump()) return false;
+      groundJump(sk.angle);
+    } else if (sk.type === 'dash') {
+      if (!canAirAction() || player.dashUsed) return false;
+      startDash(sk.dir);
+    }
+    // glide は押している間だけ効くので、ここでは何もしない
+    return true;
   }
 
   function update() {
@@ -267,14 +318,33 @@
     }
 
     speed = speedAt(camera);
-    const prevFront = camera + PLAYER_X + PIECE_W / 2 - 4;
+    const prevFront = camera + p.sx + PIECE_W / 2 - 4;
+    const prevBack = camera + p.sx - PIECE_W / 2 + 4;
     camera += speed;
+    if (p.onGround) {
+      p.sx += Math.max(-RETURN_SPEED, Math.min(RETURN_SPEED, (HOME_X - p.sx) * 0.05));
+    } else {
+      p.sx += p.vx;
+    }
+    p.sx = Math.min(RIGHT_LIMIT, p.sx);
     generate();
 
-    // 段差の壁・穴の向こう岸の壁に正面からぶつかったか
-    const front = camera + PLAYER_X + PIECE_W / 2 - 4;
+    // 画面の左からはみ出したらアウト
+    if (p.sx - PIECE_W / 2 < 0) {
+      p.outLeft = true;
+      gameOver();
+      return;
+    }
+
+    // 段差の壁・穴の向こう岸の壁にぶつかったか（後ろへ移動中は背後の壁も）
+    const front = camera + p.sx + PIECE_W / 2 - 4;
+    const back = camera + p.sx - PIECE_W / 2 + 4;
     for (const s of segments) {
-      if (s.type === 'road' && s.x > prevFront && s.x <= front && p.y > s.y0 + WALL_TOL) {
+      if (s.type !== 'road') continue;
+      const hitFront = s.x > prevFront && s.x <= front && p.y > s.y0 + WALL_TOL;
+      const end = s.x + s.w;
+      const hitBack = end < prevBack && end >= back && p.y > s.y1 + WALL_TOL;
+      if (hitFront || hitBack) {
         crash();
         return;
       }
@@ -283,6 +353,10 @@
     if (input.jumpBuffer > 0) {
       if (tryJump()) input.jumpBuffer = 0;
       else input.jumpBuffer--;
+    }
+    if (input.skillBuffer > 0) {
+      if (trySkill()) input.skillBuffer = 0;
+      else input.skillBuffer--;
     }
 
     const surf = surfaceUnder();
@@ -293,21 +367,34 @@
         // 道の端・下り段差から踏み外した
         p.onGround = false;
         p.coyote = COYOTE_FRAMES;
+        p.vx = 0;
       }
     }
     if (!p.onGround) {
-      let g = piece.gravity;
-      if (p.vy < 0 && !input.jumpHeld) g *= CUT_GRAVITY;
-      else if (p.vy > 0 && input.jumpHeld && p.floatLeft > 0) { g *= FLOAT_GRAVITY; p.floatLeft--; }
-      p.vy += g;
+      if (p.dash > 0) {
+        // 空中ダッシュ中は高さが変わらない
+        p.vy = 0;
+        if (--p.dash === 0) p.vx = 0;
+      } else {
+        let g = piece.gravity;
+        if (p.vy < 0 && !input.jumpHeld && !piece.jumpTop) g *= CUT_GRAVITY;
+        else if (p.vy > 0 && input.jumpHeld && p.floatLeft > 0) { g *= FLOAT_GRAVITY; p.floatLeft--; }
+        p.vy += g;
+        if (p.vy > GLIDE_FALL && input.skillHeld && p.glideLeft > 0) {
+          p.vy = GLIDE_FALL;
+          p.glideLeft--;
+        }
+      }
       const ny = p.y + p.vy;
       if (!p.falling && surf !== null && ny >= surf && p.y <= surf + LAND_TOL && p.vy > -2) {
         // 着地（上り坂が下から迫ってきた場合も含む）
         p.y = surf;
+        p.vx = 0;
         p.vy = 0;
+        p.dash = 0;
         p.onGround = true;
         p.jumpsUsed = 0;
-        puff(PLAYER_X, surf, 5);
+        puff(p.sx, surf, 5);
       } else if (!p.falling && surf !== null && ny > surf + LAND_TOL) {
         // 地面にめり込んだ＝壁に激突
         crash();
@@ -320,10 +407,10 @@
     }
 
     // 見た目の傾き
-    const target = p.falling ? 1.2 : p.onGround ? 0 : Math.max(-0.35, Math.min(0.35, p.vy * 0.03));
+    const target = p.falling ? 1.2 : p.onGround || p.dash > 0 ? 0 : Math.max(-0.35, Math.min(0.35, p.vy * 0.03));
     p.angle += (target - p.angle) * 0.2;
 
-    if (p.onGround && frame % 6 === 0) puff(PLAYER_X - PIECE_W / 2, p.y, 1);
+    if (p.onGround && frame % 6 === 0) puff(p.sx - PIECE_W / 2, p.y, 1);
 
     updateParticles();
 
@@ -473,6 +560,21 @@
     ctx.font = '14px sans-serif';
     ctx.fillText(`${piece.name}　ベスト ${best} m`, 30, 70);
 
+    // 空中ダッシュが使えるか
+    if (piece.airDash) {
+      ctx.fillStyle = player.onGround || !player.dashUsed ? '#ffc35c' : 'rgba(255,255,255,0.25)';
+      ctx.beginPath();
+      ctx.arc(228, 45, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // 滑空の残り時間
+    if (piece.skill && piece.skill.type === 'glide') {
+      const left = player.onGround ? 1 : player.glideLeft / piece.skill.frames;
+      ctx.fillStyle = 'rgba(255,255,255,0.25)';
+      ctx.fillRect(176, 40, 56, 8);
+      ctx.fillStyle = '#ffc35c';
+      ctx.fillRect(176, 40, 56 * left, 8);
+    }
     // 残りジャンプ回数（多段ジャンプの駒のみ）
     if (piece.maxJumps > 1) {
       const left = player.onGround ? piece.maxJumps : piece.maxJumps - player.jumpsUsed;
@@ -496,7 +598,7 @@
       ctx.fillStyle = `rgba(120, 80, 40, ${q.life / q.max * 0.6})`;
       ctx.fillRect(q.x, q.y - 3, 4, 4);
     }
-    drawPiece(PLAYER_X, player.y, player.angle, piece);
+    drawPiece(player.sx, player.y, player.angle, piece);
     drawHud();
   }
 
@@ -559,6 +661,12 @@
     }
   }
   function jumpUp() { input.jumpHeld = false; }
+  function skillDown() {
+    if (state !== 'playing') return;
+    if (!input.skillHeld) input.skillBuffer = BUFFER_FRAMES;
+    input.skillHeld = true;
+  }
+  function skillUp() { input.skillHeld = false; }
 
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyZ') {
@@ -566,7 +674,7 @@
       if (!e.repeat) jumpDown();
     } else if (e.code === 'KeyX') {
       e.preventDefault();
-      if (!e.repeat) useSkill();
+      if (!e.repeat) skillDown();
     } else if (state === 'select' && /^Digit[1-8]$/.test(e.code)) {
       startGame(PIECES[Number(e.code.slice(5)) - 1]);
     } else if (state === 'over' && e.code === 'Escape') {
@@ -575,8 +683,9 @@
   });
   window.addEventListener('keyup', (e) => {
     if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyZ') jumpUp();
+    else if (e.code === 'KeyX') skillUp();
   });
-  window.addEventListener('blur', jumpUp);
+  window.addEventListener('blur', () => { jumpUp(); skillUp(); });
 
   function bindButton(el, down, up) {
     el.addEventListener('pointerdown', (e) => {
@@ -592,10 +701,11 @@
   }
   bindButton(document.getElementById('btn-jump'), jumpDown, jumpUp);
   const skillBtn = document.getElementById('btn-skill');
-  bindButton(skillBtn, useSkill);
+  bindButton(skillBtn, skillDown, skillUp);
 
   function updateSkillButton() {
-    skillBtn.querySelector('small').textContent = piece && piece.skill ? '' : '準備中';
+    skillBtn.querySelector('small').textContent = piece && piece.skill ? piece.skill.label : 'なし';
+    skillBtn.classList.toggle('none', !(piece && piece.skill));
   }
 
   requestAnimationFrame(loop);
