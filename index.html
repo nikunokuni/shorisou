@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>将棋走</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="game"></canvas>
+
+    <!-- 駒選択画面 -->
+    <div id="select" class="overlay">
+      <h1>将棋走</h1>
+      <p class="sub">駒を選んでスタート！ 穴に落ちないように走り抜けろ</p>
+      <div id="piece-list"></div>
+      <p class="hint">ジャンプ: Space / ↑ / Z ・ スキル: X（準備中）</p>
+    </div>
+
+    <!-- ゲームオーバー画面 -->
+    <div id="over" class="overlay hidden">
+      <h2>落ちた…</h2>
+      <p id="over-score"></p>
+      <p id="over-best"></p>
+      <div class="over-buttons">
+        <button id="btn-retry">もう一度 (Space)</button>
+        <button id="btn-change">駒を選び直す</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 操作ボタン -->
+  <div id="controls">
+    <button id="btn-skill" class="ctrl">スキル<small>準備中</small></button>
+    <button id="btn-jump" class="ctrl">ジャンプ</button>
+  </div>
+</div>
+<script src="src/pieces.js"></script>
+<script src="src/game.js"></script>
+</body>
+</html>
