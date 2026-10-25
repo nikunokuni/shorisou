@@ -649,8 +649,8 @@
     }
   }
 
-  // enemy: 相手の駒（暗めの色）、weak: 苦手な駒（赤い縁取り）
-  function drawPiece(cx, bottom, angle, p, enemy = false, weak = false) {
+  // enemy: 相手の駒（暗めの色）
+  function drawPiece(cx, bottom, angle, p, enemy = false) {
     ctx.save();
     ctx.translate(cx, bottom - PIECE_H / 2);
     ctx.rotate(angle);
@@ -667,14 +667,9 @@
     g.addColorStop(0, enemy ? '#e2c48c' : '#f6dda6');
     g.addColorStop(1, enemy ? '#b98a48' : '#d5a65c');
     ctx.fillStyle = g;
-    if (weak) {
-      ctx.shadowColor = 'rgba(220, 30, 20, 0.9)';
-      ctx.shadowBlur = 14;
-    }
     ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = weak ? '#d01f14' : '#6b3d14';
-    ctx.lineWidth = weak ? 3 : 2;
+    ctx.strokeStyle = '#6b3d14';
+    ctx.lineWidth = 2;
     ctx.stroke();
     ctx.fillStyle = '#1a0f05';
     ctx.font = 'bold 26px "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif';
@@ -735,7 +730,7 @@
       ctx.fillRect(q.x, q.y - 3, 4, 4);
     }
     for (const e of enemies) {
-      drawPiece(e.wx - camera, enemyY(e), Math.PI, e.kind, true, e.kind.id === piece.weak);
+      drawPiece(e.wx - camera, enemyY(e), Math.PI, e.kind, true);
     }
     drawPiece(player.sx, player.y, player.angle, piece);
     ctx.textAlign = 'center';
