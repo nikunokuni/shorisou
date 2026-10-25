@@ -844,5 +844,10 @@
     skillBtn.classList.toggle('none', !(piece && piece.skill));
   }
 
+  // ?piece=歩 (または fu) で、その駒ですぐスタート
+  const startPiece = new URLSearchParams(location.search).get('piece');
+  const linked = PIECES.find((p) => p.kanji === startPiece || p.id === startPiece);
+  if (linked) startGame(linked);
+
   requestAnimationFrame(loop);
 })();
