@@ -185,9 +185,11 @@
         continue;
       }
       const cur = last.y1;
-      // 壁：細くて高い道。進むほど高くなる（駒のジャンプで越えられる高さまで）
+      // 壁：細くて高い道。進むほど高くなる（上限は駒のジャンプの高さの8割。
+      // 歩だけはジャンプの高さと同じくらいまで出るので、越えられない壁もある）
       // 上り坂の直後は坂に引っかかるので出さない
-      const wallH = Math.min(jumpHeight(piece, cur) * 0.6, 30 + hDiff * 70, cur - Y_TOP);
+      const wallRate = piece.id === 'fu' ? 1 : 0.8;
+      const wallH = Math.min(jumpHeight(piece, cur) * wallRate, 30 + hDiff * 70, cur - Y_TOP);
       if (wallH >= 24 && last.y1 >= last.y0 - 5 && Math.random() < 0.12 + diff * 0.18) {
         segments.push({ type: 'road', wall: true, x, w: rand(30, 60), y0: cur - wallH, y1: cur - wallH, baseY: cur });
         continue;
