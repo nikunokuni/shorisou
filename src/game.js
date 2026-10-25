@@ -5,8 +5,9 @@
   const W = 960;
   const H = 540;
   const GROUND_Y = 400;       // スタート地点の道の高さ
-  const Y_TOP = 230;          // 道の高さの上限（画面上の座標なので小さいほど高い）
+  const Y_TOP = 190;          // 道の高さの上限（画面上の座標なので小さいほど高い）
   const Y_BOT = 450;          // 道の高さの下限。これより下に落ちたら復帰できない
+  const PIT_Y = Y_BOT + 20;   // 穴の暗い部分が始まる高さ（どの穴でも同じ）
   const HOME_X = 300;         // プレイヤーの基本の画面上のX座標。地上ではここへ戻っていく
   const RIGHT_LIMIT = W - 100; // これより右には進めない
   const RETURN_SPEED = 3;     // 地上で基本位置へ戻る速さ
@@ -15,7 +16,7 @@
   const TOP_APEX = PIECE_H + 8; // 「画面の上まで跳ぶ」ときの最高点（足元のY座標）
   const STEP = 1000 / 60;     // 物理更新は固定60fps
   const BASE_SPEED = 6;
-  const MAX_SPEED = 12;
+  const MAX_SPEED = 18;
   const SPEED_UP = 0.0004;    // 1px進むごとに増える速度
   const CUT_GRAVITY = 2.4;    // 上昇中にボタンを離したときの重力倍率（小ジャンプ用）
   const FLOAT_GRAVITY = 0.2;  // 浮遊中の重力倍率
@@ -32,6 +33,8 @@
   const CRASH_FRAMES = 45;    // 激突してからゲームオーバー画面までの時間
   const SCORE_SAME = 500;     // 自分と同じ駒を取ったときの得点
   const SCORE_OTHER = 100;    // それ以外の駒を取ったときの得点
+  const DIFF_DIST = 30000;    // この距離で穴の数などの難しさが最大になる
+  const HEIGHT_DIFF_MAX = 2;  // 高低差・壁の高さは DIFF_DIST のこの倍の距離まで大きくなり続ける
 
   const PIECES = window.PIECES;
 
@@ -148,8 +151,8 @@
   function clampY(y) { return Math.max(Y_TOP, Math.min(Y_BOT, y)); }
   function speedAt(x) { return Math.min(MAX_SPEED, BASE_SPEED + x * SPEED_UP); }
 
-  // 道を1本作る。進むほど坂が多く急になる
-  function makeRoad(x, y0, s, diff) {
+  // 道を1本作る。進むほど坂が多く急になる（hDiff: 高低差の難しさ 0〜HEIGHT_DIFF_MAX）
+  function makeRoad(x, y0, s, diff, hDiff) {
     let minRoad = Math.max(140, s * 26);
     // 跳ぶ距離を調整できない駒は、着地した道でもう一度跳べるよう道を長くする
     if (piece.jumpTop) minRoad = Math.max(minRoad, jumpReach(piece, 0, y0, s));
@@ -157,7 +160,7 @@
     const w = rand(minRoad, maxRoad);
     let y1 = y0;
     if (Math.random() < 0.3 + diff * 0.4) {
-      const amp = Math.min(MAX_SLOPE * w, 40 + diff * 120);
+      const amp = Math.min(MAX_SLOPE * w, 40 + hDiff * 120);
       y1 = clampY(y0 + rand(-amp, amp));
     }
     return { type: 'road', x, w, y0, y1 };
@@ -168,17 +171,30 @@
       const x = lastEnd();
       const last = segments[segments.length - 1];
       // 進んだ距離に応じて難しくなる（0〜1）
-      const diff = Math.min(1, x / 30000);
+      const diff = Math.min(1, x / DIFF_DIST);
+      const hDiff = Math.min(HEIGHT_DIFF_MAX, x / DIFF_DIST);
       // 生成時点の速度で計算（実際に到達する頃は少し速いので余裕が出る）
       const s = speedAt(x);
       if (last.type === 'hole') {
-        segments.push(makeRoad(x, last.nextY, s, diff));
+        segments.push(makeRoad(x, last.nextY, s, diff, hDiff));
+        continue;
+      }
+      if (last.wall) {
+        // 壁の向こうは壁の手前と同じ高さの道
+        segments.push(makeRoad(x, last.baseY, s, diff, hDiff));
         continue;
       }
       const cur = last.y1;
+      // 壁：細くて高い道。進むほど高くなる（駒のジャンプで越えられる高さまで）
+      // 上り坂の直後は坂に引っかかるので出さない
+      const wallH = Math.min(jumpHeight(piece, cur) * 0.6, 30 + hDiff * 70, cur - Y_TOP);
+      if (wallH >= 24 && last.y1 >= last.y0 - 5 && Math.random() < 0.12 + diff * 0.18) {
+        segments.push({ type: 'road', wall: true, x, w: rand(30, 60), y0: cur - wallH, y1: cur - wallH, baseY: cur });
+        continue;
+      }
       // 段差の上限は駒のジャンプ力で決まり、進むほど大きくなる
-      const upMax = Math.min(jumpHeight(piece, cur) * 0.55, 20 + diff * 110);
-      const downMax = 30 + diff * 120;
+      const upMax = Math.min(jumpHeight(piece, cur) * 0.55, 20 + hDiff * 110);
+      const downMax = 30 + hDiff * 120;
       let dy = clampY(cur + rand(-upMax, downMax)) - cur;
       // 上り坂の直後に上り段差があると、坂に引っかかって越えられないので下りにする
       if (last.y1 < last.y0 - 5) dy = clampY(cur + Math.abs(dy)) - cur;
@@ -193,9 +209,9 @@
         segments.push({ type: 'hole', x, w: Math.max(50, reach * rand(lo, hi)), prevY: cur, nextY: cur + dy });
       } else if (r < pHole + 0.15 + diff * 0.2) {
         // 段差：上りなら壁になる
-        segments.push(makeRoad(x, cur + dy, s, diff));
+        segments.push(makeRoad(x, cur + dy, s, diff, hDiff));
       } else {
-        segments.push(makeRoad(x, cur, s, diff));
+        segments.push(makeRoad(x, cur, s, diff, hDiff));
       }
     }
     while (segments.length && segments[0].x + segments[0].w < camera - 300) segments.shift();
@@ -482,7 +498,7 @@
   }
 
   function spawnEnemy() {
-    const diff = Math.min(1, camera / 30000);
+    const diff = Math.min(1, camera / DIFF_DIST);
     enemyTimer = rand(120, 240) * (1 - diff * 0.4);
     const wx = camera + W + PIECE_W;
     const v = rand(1, 3);  // 画面に対しては スクロール速度 + v で左へ飛んでくる
@@ -585,8 +601,8 @@
       const x = s.x - camera;
       if (x > W || x + s.w < 0) continue;
       if (s.type === 'hole') {
-        // 穴（谷底の闇）
-        const top = Math.min(s.prevY, s.nextY) + 20;
+        // 穴（谷底の闇）。崖の高さに関係なく同じ高さから暗くなる
+        const top = PIT_Y;
         const pit = ctx.createLinearGradient(0, top, 0, H);
         pit.addColorStop(0, 'rgba(42, 26, 16, 0)');
         pit.addColorStop(0.3, '#2a1a10');
@@ -611,8 +627,8 @@
       for (let gx = first; gx < s.x + s.w; gx += BOARD_CELL) {
         for (let gy = Y_TOP; gy < H; gy += BOARD_CELL) {
           const r = cellRandom(gx / BOARD_CELL, (gy - Y_TOP) / BOARD_CELL);
-          if (r >= 0.12) continue;
-          ctx.fillStyle = r < 0.06 ? '#f4a3c4' : '#a9cdf5';
+          if (r >= 0.04) continue;
+          ctx.fillStyle = r < 0.02 ? '#f4a3c4' : '#a9cdf5';
           ctx.fillRect(gx - camera, gy, BOARD_CELL, BOARD_CELL);
         }
       }
