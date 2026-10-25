@@ -265,7 +265,11 @@
 
   function score() { return Math.floor(camera / 10) + bonus; }
 
+  // ?back=URL で開かれたときは、駒を選び直すとそのURLへ戻る（NewShoger のレベル5から来たとき）
+  const backUrl = new URLSearchParams(location.search).get('back');
+
   function showSelect() {
+    if (backUrl) { location.href = backUrl; return; }
     setState('select');
     overEl.classList.add('hidden');
     selectEl.classList.remove('hidden');
@@ -569,6 +573,13 @@
     ctx.fill();
   }
 
+  // マスの座標ごとに決まる 0〜1 の値
+  function cellRandom(cx, cy) {
+    let h = Math.imul(cx | 0, 374761393) ^ Math.imul(cy | 0, 668265263);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+
   function drawRoad() {
     for (const s of segments) {
       const x = s.x - camera;
@@ -595,6 +606,16 @@
       ctx.fillStyle = '#d9a85b';
       ctx.fill();
       ctx.clip();
+      // ところどころピンクと青のマス（マスの位置から決めるので、流れても色は変わらない）
+      const first = Math.floor(s.x / BOARD_CELL) * BOARD_CELL;
+      for (let gx = first; gx < s.x + s.w; gx += BOARD_CELL) {
+        for (let gy = Y_TOP; gy < H; gy += BOARD_CELL) {
+          const r = cellRandom(gx / BOARD_CELL, (gy - Y_TOP) / BOARD_CELL);
+          if (r >= 0.12) continue;
+          ctx.fillStyle = r < 0.06 ? '#f4a3c4' : '#a9cdf5';
+          ctx.fillRect(gx - camera, gy, BOARD_CELL, BOARD_CELL);
+        }
+      }
       ctx.strokeStyle = 'rgba(60, 30, 5, 0.55)';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
