@@ -6,7 +6,7 @@
 <title>将棋走</title>
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body data-state="select">
 <div id="app">
   <div id="stage">
     <canvas id="game"></canvas>
@@ -16,7 +16,7 @@
       <h1>将棋走</h1>
       <p class="sub">駒を選んでスタート！ 穴に落ちないように走り抜けろ</p>
       <div id="piece-list"></div>
-      <p class="hint">ジャンプ: Space / ↑ / Z ・ スキル: X</p>
+      <p class="hint">A ジャンプ: Space / ↑ / Z ・ B スキル: X</p>
     </div>
 
     <!-- ゲームオーバー画面 -->
@@ -31,10 +31,10 @@
     </div>
   </div>
 
-  <!-- 操作ボタン -->
+  <!-- 操作ボタン（左: B / 右: A） -->
   <div id="controls">
-    <button id="btn-skill" class="ctrl none">スキル<small>なし</small></button>
-    <button id="btn-jump" class="ctrl">ジャンプ</button>
+    <button id="btn-skill" class="ctrl none" aria-label="Bボタン（スキル）"><span class="key">B</span><small>なし</small></button>
+    <button id="btn-jump" class="ctrl" aria-label="Aボタン（ジャンプ）"><span class="key">A</span><small>ジャンプ</small></button>
   </div>
 </div>
 <script src="src/pieces.js"></script>

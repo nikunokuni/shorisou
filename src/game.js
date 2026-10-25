@@ -8,8 +8,8 @@
   const Y_TOP = 230;          // 道の高さの上限（画面上の座標なので小さいほど高い）
   const Y_BOT = 450;          // 道の高さの下限。これより下に落ちたら復帰できない
   const HOME_X = 300;         // プレイヤーの基本の画面上のX座標。地上ではここへ戻っていく
-  const RIGHT_LIMIT = W - 160; // これより右には進めない
-  const RETURN_SPEED = 1.5;   // 地上で基本位置へ戻る速さ
+  const RIGHT_LIMIT = W - 100; // これより右には進めない
+  const RETURN_SPEED = 3;     // 地上で基本位置へ戻る速さ
   const PIECE_W = 46;
   const PIECE_H = 54;
   const TOP_APEX = PIECE_H + 8; // 「画面の上まで跳ぶ」ときの最高点（足元のY座標）
@@ -30,6 +30,8 @@
   const WALL_TOL = 6;         // 段差の角に足がこれ以上めり込んだら壁に激突
   const MAX_SLOPE = 0.45;     // 坂の最大傾き
   const CRASH_FRAMES = 45;    // 激突してからゲームオーバー画面までの時間
+  const SCORE_SAME = 500;     // 自分と同じ駒を取ったときの得点
+  const SCORE_OTHER = 100;    // それ以外の駒を取ったときの得点
 
   const PIECES = window.PIECES;
 
@@ -54,11 +56,18 @@
   }
 
   // ---- ジャンプ性能の計算 ----
-  // 高さ y0 から地上ジャンプしたときの初速。angle を省略すると駒の通常ジャンプの向き
+  function homeOf(p) { return p.homeX || HOME_X; }
+
+  // 高さ y0 から地上ジャンプしたときの初速。angle を省略すると駒の通常ジャンプの向き。
+  // jumpTop の駒は画面の上まで angle の向きに一直線に上がる（cot: 上昇中の 横速度/上昇速度）
   function launch(p, y0, angle) {
-    if (p.jumpTop) return { vx: 0, vy: -Math.sqrt(2 * p.gravity * Math.max(0, y0 - TOP_APEX)) };
     const a = ((angle !== undefined ? angle : p.jumpAngle || 90) * Math.PI) / 180;
-    return { vx: p.jumpPower * Math.cos(a), vy: -p.jumpPower * Math.sin(a) };
+    if (p.jumpTop) {
+      const vy = -Math.sqrt(2 * p.gravity * Math.max(0, y0 - TOP_APEX));
+      const cot = Math.cos(a) / Math.sin(a);
+      return { vx: -vy * cot, vy, cot };
+    }
+    return { vx: p.jumpPower * Math.cos(a), vy: -p.jumpPower * Math.sin(a), cot: null };
   }
   function jumpHeight(p, y0 = GROUND_Y) {
     const vy = launch(p, y0).vy;
@@ -78,6 +87,25 @@
     }
     return 0;
   }
+  // スクロール速度 s のとき、ボタンを押しっぱなしで跳んで踏み切りより h だけ高い位置まで
+  // 落ちてくるまでに進む距離（前へ跳ぶ駒はその分も含む。届かない高さなら 0）
+  function jumpReach(p, h, y0, s) {
+    let { vx, vy, cot } = launch(p, y0);
+    let y = 0, sx = homeOf(p), dx = 0, floatLeft = p.floatFrames, t = 0;
+    while (t < 600) {
+      const nsx = Math.min(RIGHT_LIMIT, sx + vx);
+      dx += s + nsx - sx;
+      sx = nsx;
+      let g = p.gravity;
+      if (vy > 0 && floatLeft > 0) { g *= FLOAT_GRAVITY; floatLeft--; }
+      vy += g;
+      if (cot !== null) vx = vy < 0 ? -vy * cot : 0;
+      y += vy;
+      t++;
+      if (vy > 0 && y >= -h) return dx;
+    }
+    return 0;
+  }
   // ボタンを押しっぱなしで1回跳んだときの滞空フレーム数
   function airFrames(p) { return framesToHeight(p, 0); }
 
@@ -92,17 +120,21 @@
   let best = 0;
   let overAt = 0;
   let frame = 0;
+  let enemies = [];       // 飛んでくる相手の駒
+  let popups = [];        // 得点表示
+  let bonus = 0;          // 駒を取って得た得点
+  let enemyTimer = 0;     // 次の相手の駒が出るまでのフレーム数
 
   const input = { jumpHeld: false, jumpBuffer: 0, skillHeld: false, skillBuffer: 0 };
 
   function newPlayer() {
     return {
-      sx: HOME_X, y: GROUND_Y,  // sx は画面上のX座標、y は足元のY座標
-      vx: 0, vy: 0,             // vx は画面に対する横の速さ
+      sx: homeOf(piece), y: GROUND_Y,  // sx は画面上のX座標、y は足元のY座標
+      vx: 0, vy: 0, cot: null,  // vx は画面に対する横の速さ
       onGround: true, coyote: 0,
       jumpsUsed: 0, floatLeft: 0, glideLeft: 0,
       dash: 0, dashUsed: false,
-      falling: false, crashed: 0, outLeft: false, angle: 0,
+      falling: false, crashed: 0, outLeft: false, captured: false, angle: 0,
     };
   }
 
@@ -120,7 +152,7 @@
   function makeRoad(x, y0, s, diff) {
     let minRoad = Math.max(140, s * 26);
     // 跳ぶ距離を調整できない駒は、着地した道でもう一度跳べるよう道を長くする
-    if (piece.jumpTop) minRoad = Math.max(minRoad, framesToHeight(piece, 0, y0) * s);
+    if (piece.jumpTop) minRoad = Math.max(minRoad, jumpReach(piece, 0, y0, s));
     const maxRoad = Math.max(minRoad + 40, 560 - diff * 260);
     const w = rand(minRoad, maxRoad);
     let y1 = y0;
@@ -155,10 +187,10 @@
       const pHole = 0.3 + diff * 0.45;
       if (r < pHole) {
         // 穴：向こう岸の高さに合わせて、ジャンプで届く幅にする
-        const f = framesToHeight(piece, -dy + WALL_TOL, cur);
+        const reach = jumpReach(piece, -dy + WALL_TOL, cur, s);
         const lo = 0.35 + diff * 0.2;
         const hi = 0.55 + diff * 0.2;
-        segments.push({ type: 'hole', x, w: Math.max(50, f * s * rand(lo, hi)), prevY: cur, nextY: cur + dy });
+        segments.push({ type: 'hole', x, w: Math.max(50, reach * rand(lo, hi)), prevY: cur, nextY: cur + dy });
       } else if (r < pHole + 0.15 + diff * 0.2) {
         // 段差：上りなら壁になる
         segments.push(makeRoad(x, cur + dy, s, diff));
@@ -197,31 +229,44 @@
     particles = [];
     player = newPlayer();
     // 最初は長い道から
-    segments = [{ type: 'road', x: -300, w: HOME_X + 300 + 700, y0: GROUND_Y, y1: GROUND_Y }];
+    segments = [{ type: 'road', x: -300, w: homeOf(p) + 300 + 700, y0: GROUND_Y, y1: GROUND_Y }];
     generate();
+    enemies = [];
+    popups = [];
+    bonus = 0;
+    enemyTimer = 180;
     input.jumpBuffer = 0;
     input.skillBuffer = 0;
-    state = 'playing';
+    setState('playing');
     selectEl.classList.add('hidden');
     overEl.classList.add('hidden');
     updateSkillButton();
   }
 
+  // 画面の状態を切り替える（CSS からも参照できるよう body に反映）
+  function setState(st) {
+    state = st;
+    document.body.dataset.state = st;
+  }
+
   function gameOver() {
-    state = 'over';
+    setState('over');
     overAt = performance.now();
-    const dist = Math.floor(camera / 10);
-    const isBest = dist > best;
-    if (isBest) { best = dist; saveBest(piece.id, dist); }
+    const sc = score();
+    const isBest = sc > best;
+    if (isBest) { best = sc; saveBest(piece.id, sc); }
     document.getElementById('over-title').textContent =
-      player.outLeft ? 'はみ出した…' : player.crashed ? 'ぶつかった…' : '落ちた…';
-    document.getElementById('over-score').textContent = `${piece.name}　${dist} m`;
-    document.getElementById('over-best').textContent = isBest ? '★ 自己ベスト更新！' : `ベスト ${best} m`;
+      player.outLeft ? 'はみ出した…' : player.captured ? '取られた…' : player.crashed ? 'ぶつかった…' : '落ちた…';
+    document.getElementById('over-score').textContent = `${piece.name}　${sc} 点`;
+    document.getElementById('over-best').textContent =
+      `距離 ${Math.floor(camera / 10)} m　` + (isBest ? '★ 自己ベスト更新！' : `ベスト ${best} 点`);
     overEl.classList.remove('hidden');
   }
 
+  function score() { return Math.floor(camera / 10) + bonus; }
+
   function showSelect() {
-    state = 'select';
+    setState('select');
     overEl.classList.add('hidden');
     selectEl.classList.remove('hidden');
   }
@@ -249,6 +294,7 @@
     const v = launch(piece, p.y, angle);
     p.vx = v.vx;
     p.vy = v.vy;
+    p.cot = v.cot;
     p.jumpsUsed = 1;
     p.onGround = false;
     p.coyote = 0;
@@ -322,7 +368,7 @@
     const prevBack = camera + p.sx - PIECE_W / 2 + 4;
     camera += speed;
     if (p.onGround) {
-      p.sx += Math.max(-RETURN_SPEED, Math.min(RETURN_SPEED, (HOME_X - p.sx) * 0.05));
+      p.sx += Math.max(-RETURN_SPEED, Math.min(RETURN_SPEED, (homeOf(piece) - p.sx) * 0.05));
     } else {
       p.sx += p.vx;
     }
@@ -380,6 +426,7 @@
         if (p.vy < 0 && !input.jumpHeld && !piece.jumpTop) g *= CUT_GRAVITY;
         else if (p.vy > 0 && input.jumpHeld && p.floatLeft > 0) { g *= FLOAT_GRAVITY; p.floatLeft--; }
         p.vy += g;
+        if (p.cot !== null) p.vx = p.vy < 0 ? -p.vy * p.cot : 0;  // 一直線に上がりきったら真下へ
         if (p.vy > GLIDE_FALL && input.skillHeld && p.glideLeft > 0) {
           p.vy = GLIDE_FALL;
           p.glideLeft--;
@@ -391,6 +438,7 @@
         p.y = surf;
         p.vx = 0;
         p.vy = 0;
+        p.cot = null;
         p.dash = 0;
         p.onGround = true;
         p.jumpsUsed = 0;
@@ -412,9 +460,69 @@
 
     if (p.onGround && frame % 6 === 0) puff(p.sx - PIECE_W / 2, p.y, 1);
 
+    updateEnemies();
+    if (p.crashed) return;
     updateParticles();
 
     if (p.y > H + PIECE_H * 2) gameOver();
+  }
+
+  // ---- 相手の駒 ----
+  // 段差の手前や穴の近くか（苦手な駒をここに出すと避けにくい）
+  function isRisky(wx) {
+    return segments.some((s, i) => {
+      if (s.x < wx - 300 || s.x > wx + 150) return false;
+      const pr = segments[i - 1];
+      return s.type === 'hole' || (pr && pr.type === 'road' && s.y0 < pr.y1 - WALL_TOL);
+    });
+  }
+
+  function spawnEnemy() {
+    const diff = Math.min(1, camera / 30000);
+    enemyTimer = rand(120, 240) * (1 - diff * 0.4);
+    const wx = camera + W + PIECE_W;
+    const v = rand(1, 3);  // 画面に対しては スクロール速度 + v で左へ飛んでくる
+    // プレイヤーとすれ違う地点
+    const meet = wx - (v * (wx - camera - homeOf(piece))) / (speed + v);
+    let kind = PIECES[Math.floor(Math.random() * PIECES.length)];
+    if (kind.id === piece.weak && isRisky(meet)) {
+      const others = PIECES.filter((q) => q.id !== piece.weak);
+      kind = others[Math.floor(Math.random() * others.length)];
+    }
+    const grounds = [meet - 80, meet, meet + 80].map(groundAt).filter((y) => y !== null);
+    const ground = grounds.length ? Math.min(...grounds) : GROUND_Y;
+    // 苦手な駒は跳ばなければ当たらない高さ、他は走っていれば取れる高さか跳べば取れる高さ
+    const lift = kind.id === piece.weak ? rand(PIECE_H + 40, PIECE_H + 100)
+      : Math.random() < 0.5 ? rand(0, 12) : rand(PIECE_H + 10, PIECE_H + 70);
+    enemies.push({ kind, wx, y: Math.max(PIECE_H + 10, ground - lift), v, phase: rand(0, Math.PI * 2) });
+  }
+
+  function enemyY(e) { return e.y + Math.sin(e.phase) * 6; }
+
+  function updateEnemies() {
+    if (--enemyTimer <= 0) spawnEnemy();
+    for (const e of enemies) { e.wx -= e.v; e.phase += 0.08; }
+    enemies = enemies.filter((e) => e.wx > camera - PIECE_W * 2);
+
+    const p = player;
+    for (const e of enemies) {
+      const ex = e.wx - camera;
+      const ey = enemyY(e);
+      if (Math.abs(ex - p.sx) > PIECE_W - 12 || Math.abs(ey - p.y) > PIECE_H - 12) continue;
+      if (e.kind.id === piece.weak) {
+        p.captured = true;
+        crash();
+        return;
+      }
+      const pts = e.kind.id === piece.id ? SCORE_SAME : SCORE_OTHER;
+      bonus += pts;
+      popups.push({ x: ex, y: ey - PIECE_H, text: `+${pts}`, big: pts === SCORE_SAME, life: 50 });
+      puff(ex, ey - PIECE_H / 2, 10);
+      e.taken = true;
+    }
+    enemies = enemies.filter((e) => !e.taken);
+    for (const q of popups) { q.y -= 1; q.life--; }
+    popups = popups.filter((q) => q.life > 0);
   }
 
   // ---- パーティクル ----
@@ -520,7 +628,8 @@
     }
   }
 
-  function drawPiece(cx, bottom, angle, p) {
+  // enemy: 相手の駒（暗めの色）、weak: 苦手な駒（赤い縁取り）
+  function drawPiece(cx, bottom, angle, p, enemy = false, weak = false) {
     ctx.save();
     ctx.translate(cx, bottom - PIECE_H / 2);
     ctx.rotate(angle);
@@ -534,12 +643,17 @@
     ctx.lineTo(-w * 0.39, -h * 0.78);
     ctx.closePath();
     const g = ctx.createLinearGradient(0, -h, 0, 0);
-    g.addColorStop(0, '#f6dda6');
-    g.addColorStop(1, '#d5a65c');
+    g.addColorStop(0, enemy ? '#e2c48c' : '#f6dda6');
+    g.addColorStop(1, enemy ? '#b98a48' : '#d5a65c');
     ctx.fillStyle = g;
+    if (weak) {
+      ctx.shadowColor = 'rgba(220, 30, 20, 0.9)';
+      ctx.shadowBlur = 14;
+    }
     ctx.fill();
-    ctx.strokeStyle = '#6b3d14';
-    ctx.lineWidth = 2;
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = weak ? '#d01f14' : '#6b3d14';
+    ctx.lineWidth = weak ? 3 : 2;
     ctx.stroke();
     ctx.fillStyle = '#1a0f05';
     ctx.font = 'bold 26px "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif';
@@ -551,14 +665,15 @@
 
   function drawHud() {
     ctx.fillStyle = 'rgba(30, 15, 5, 0.6)';
-    ctx.fillRect(16, 16, 230, 64);
+    ctx.fillRect(16, 16, 250, 86);
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     ctx.font = 'bold 26px sans-serif';
-    ctx.fillText(`${Math.floor(camera / 10)} m`, 30, 50);
+    ctx.fillText(`${score()} 点`, 30, 50);
     ctx.font = '14px sans-serif';
-    ctx.fillText(`${piece.name}　ベスト ${best} m`, 30, 70);
+    ctx.fillText(`${Math.floor(camera / 10)} m　ベスト ${best} 点`, 30, 72);
+    ctx.fillText(`${piece.name}　苦手: ${weakName(piece)}`, 30, 92);
 
     // 空中ダッシュが使えるか
     if (piece.airDash) {
@@ -598,7 +713,22 @@
       ctx.fillStyle = `rgba(120, 80, 40, ${q.life / q.max * 0.6})`;
       ctx.fillRect(q.x, q.y - 3, 4, 4);
     }
+    for (const e of enemies) {
+      drawPiece(e.wx - camera, enemyY(e), Math.PI, e.kind, true, e.kind.id === piece.weak);
+    }
     drawPiece(player.sx, player.y, player.angle, piece);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    for (const q of popups) {
+      ctx.globalAlpha = Math.min(1, q.life / 20);
+      ctx.font = q.big ? 'bold 30px sans-serif' : 'bold 20px sans-serif';
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#4a2a0c';
+      ctx.strokeText(q.text, q.x, q.y);
+      ctx.fillStyle = q.big ? '#ffd23c' : '#fff';
+      ctx.fillText(q.text, q.x, q.y);
+    }
+    ctx.globalAlpha = 1;
     drawHud();
   }
 
@@ -624,6 +754,11 @@
     requestAnimationFrame(loop);
   }
 
+  function weakName(p) {
+    const w = PIECES.find((q) => q.id === p.weak);
+    return w ? w.name : 'なし';
+  }
+
   // ---- 駒選択UI ----
   const selectEl = document.getElementById('select');
   const overEl = document.getElementById('over');
@@ -642,6 +777,7 @@
       `<div class="koma">${p.kanji}</div>` +
       `<div class="piece-name">${i + 1}. ${p.name}</div>` +
       `<div class="piece-desc">${p.desc}</div>` +
+      `<div class="piece-weak">苦手: ${weakName(p)}</div>` +
       `<div class="stats">${bar('高さ', jumpHeight(p) / maxH)}${bar('滞空', airFrames(p) / maxT)}${bar('段数', p.maxJumps / maxJ)}</div>`;
     btn.addEventListener('click', () => startGame(p));
     listEl.appendChild(btn);
