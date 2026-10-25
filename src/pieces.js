@@ -9,8 +9,8 @@
 window.PIECES = [
   {
     id: 'fu', kanji: '歩', name: '歩兵',
-    desc: '素直なジャンプ。基本の一歩。',
-    jumpPower: 13, gravity: 0.7, maxJumps: 1, airJumpMul: 0, floatFrames: 0,
+    desc: '小さなジャンプ。一歩ずつ確実に。',
+    jumpPower: 8.7, gravity: 0.7, maxJumps: 1, airJumpMul: 0, floatFrames: 0,
     skill: null,
   },
   {

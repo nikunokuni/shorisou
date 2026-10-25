@@ -4,7 +4,9 @@
   // ---- 定数 ----
   const W = 960;
   const H = 540;
-  const GROUND_Y = 400;       // 道の上端（プレイヤーの足元）
+  const GROUND_Y = 400;       // スタート地点の道の高さ
+  const Y_TOP = 230;          // 道の高さの上限（画面上の座標なので小さいほど高い）
+  const Y_BOT = 450;          // 道の高さの下限。これより下に落ちたら復帰できない
   const PLAYER_X = 220;       // プレイヤーの画面上のX座標
   const PIECE_W = 46;
   const PIECE_H = 54;
@@ -17,6 +19,11 @@
   const COYOTE_FRAMES = 6;    // 道の端から落ちた直後でもジャンプできる猶予
   const BUFFER_FRAMES = 6;    // 着地直前の先行入力の猶予
   const BOARD_CELL = 48;      // 道（将棋盤）のマス目サイズ
+  const SNAP = 10;            // 接地中、これ以内の下り（坂）なら地面に吸い付く
+  const LAND_TOL = 12;        // 着地判定の許容量。これより深く地面にめり込んだら壁に激突
+  const WALL_TOL = 6;         // 段差の角に足がこれ以上めり込んだら壁に激突
+  const MAX_SLOPE = 0.45;     // 坂の最大傾き
+  const CRASH_FRAMES = 45;    // 激突してからゲームオーバー画面までの時間
 
   const PIECES = window.PIECES;
 
@@ -55,11 +62,25 @@
     return t;
   }
   function jumpHeight(p) { return (p.jumpPower * p.jumpPower) / (2 * p.gravity); }
+  // ボタンを押しっぱなしで跳んだとき、踏み切りより h だけ高い位置まで落ちてくるフレーム数
+  // （h が負なら低い位置。届かない高さなら 0）
+  function framesToHeight(p, h) {
+    let y = 0, vy = -p.jumpPower, floatLeft = p.floatFrames, t = 0;
+    while (t < 600) {
+      let g = p.gravity;
+      if (vy > 0 && floatLeft > 0) { g *= FLOAT_GRAVITY; floatLeft--; }
+      vy += g;
+      y += vy;
+      t++;
+      if (vy > 0 && y >= -h) return t;
+    }
+    return 0;
+  }
 
   // ---- 状態 ----
   let state = 'select';  // select | playing | over
   let piece = null;
-  let reach = 0;          // 1回のジャンプの滞空フレーム数（穴の幅の上限に使う）
+  let jumpH = 0;          // 1回のジャンプの高さ（段差の上限に使う）
   let camera = 0;
   let speed = BASE_SPEED;
   let segments = [];
@@ -76,7 +97,7 @@
       y: GROUND_Y, vy: 0,
       onGround: true, coyote: 0,
       jumpsUsed: 0, floatLeft: 0,
-      falling: false, angle: 0,
+      falling: false, crashed: 0, angle: 0,
     };
   }
 
@@ -87,49 +108,90 @@
   }
   function rand(a, b) { return a + Math.random() * (b - a); }
 
+  function clampY(y) { return Math.max(Y_TOP, Math.min(Y_BOT, y)); }
+  function speedAt(x) { return Math.min(MAX_SPEED, BASE_SPEED + x * SPEED_UP); }
+
+  // 道を1本作る。進むほど坂が多く急になる
+  function makeRoad(x, y0, s, diff) {
+    const minRoad = Math.max(140, s * 26);
+    const maxRoad = Math.max(minRoad + 40, 560 - diff * 260);
+    const w = rand(minRoad, maxRoad);
+    let y1 = y0;
+    if (Math.random() < 0.3 + diff * 0.4) {
+      const amp = Math.min(MAX_SLOPE * w, 40 + diff * 120);
+      y1 = clampY(y0 + rand(-amp, amp));
+    }
+    return { type: 'road', x, w, y0, y1 };
+  }
+
   function generate() {
     while (lastEnd() < camera + W + 300) {
       const x = lastEnd();
       const last = segments[segments.length - 1];
       // 進んだ距離に応じて難しくなる（0〜1）
-      const diff = Math.min(1, camera / 30000);
+      const diff = Math.min(1, x / 30000);
       // 生成時点の速度で計算（実際に到達する頃は少し速いので余裕が出る）
-      const s = Math.min(MAX_SPEED, BASE_SPEED + x * SPEED_UP);
-      if (!last || last.type === 'hole') {
-        const minRoad = Math.max(140, s * 26);
-        const maxRoad = Math.max(minRoad + 40, 560 - diff * 260);
-        segments.push({ type: 'road', x, w: rand(minRoad, maxRoad) });
+      const s = speedAt(x);
+      if (last.type === 'hole') {
+        segments.push(makeRoad(x, last.nextY, s, diff));
+        continue;
+      }
+      const cur = last.y1;
+      // 段差の上限は駒のジャンプ力で決まり、進むほど大きくなる
+      const upMax = Math.min(jumpH * 0.55, 20 + diff * 110);
+      const downMax = 30 + diff * 120;
+      let dy = clampY(cur + rand(-upMax, downMax)) - cur;
+      // 上り坂の直後に上り段差があると、坂に引っかかって越えられないので下りにする
+      if (last.y1 < last.y0 - 5) dy = clampY(cur + Math.abs(dy)) - cur;
+      if (Math.abs(dy) < 16) dy = 0;
+      const r = Math.random();
+      const pHole = 0.3 + diff * 0.45;
+      if (r < pHole) {
+        // 穴：向こう岸の高さに合わせて、ジャンプで届く幅にする
+        const f = framesToHeight(piece, -dy + WALL_TOL);
+        const lo = 0.35 + diff * 0.2;
+        const hi = 0.55 + diff * 0.2;
+        segments.push({ type: 'hole', x, w: Math.max(50, f * s * rand(lo, hi)), prevY: cur, nextY: cur + dy });
+      } else if (r < pHole + 0.15 + diff * 0.2) {
+        // 段差：上りなら壁になる
+        segments.push(makeRoad(x, cur + dy, s, diff));
       } else {
-        const maxGap = reach * s;
-        const lo = 0.3 + diff * 0.25;
-        const hi = 0.5 + diff * 0.25;
-        segments.push({ type: 'hole', x, w: Math.max(50, maxGap * rand(lo, hi)) });
+        segments.push(makeRoad(x, cur, s, diff));
       }
     }
     while (segments.length && segments[0].x + segments[0].w < camera - 100) segments.shift();
   }
 
-  // プレイヤーの足元に道があるか
-  function supported() {
-    const left = camera + PLAYER_X - PIECE_W / 2 + 6;
-    const right = camera + PLAYER_X + PIECE_W / 2 - 6;
+  // ワールド座標 wx の道の高さ（穴なら null）
+  function groundAt(wx) {
     for (const s of segments) {
-      if (s.type === 'road' && s.x < right && s.x + s.w > left) return true;
+      if (s.type === 'road' && wx >= s.x && wx < s.x + s.w) return s.y0 + (s.y1 - s.y0) * (wx - s.x) / s.w;
     }
-    return false;
+    return null;
+  }
+
+  // プレイヤーの足元で一番高い道の高さ（足元が全部穴なら null）
+  function surfaceUnder() {
+    const cx = camera + PLAYER_X;
+    let best = null;
+    for (const wx of [cx - PIECE_W / 2 + 6, cx, cx + PIECE_W / 2 - 6]) {
+      const y = groundAt(wx);
+      if (y !== null && (best === null || y < best)) best = y;
+    }
+    return best;
   }
 
   // ---- ゲーム進行 ----
   function startGame(p) {
     piece = p;
-    reach = airFrames(p);
+    jumpH = jumpHeight(p);
     best = loadBest(p.id);
     camera = 0;
     speed = BASE_SPEED;
     particles = [];
     player = newPlayer();
     // 最初は長い道から
-    segments = [{ type: 'road', x: -200, w: PLAYER_X + 200 + 700 }];
+    segments = [{ type: 'road', x: -200, w: PLAYER_X + 200 + 700, y0: GROUND_Y, y1: GROUND_Y }];
     generate();
     input.jumpBuffer = 0;
     state = 'playing';
@@ -144,6 +206,7 @@
     const dist = Math.floor(camera / 10);
     const isBest = dist > best;
     if (isBest) { best = dist; saveBest(piece.id, dist); }
+    document.getElementById('over-title').textContent = player.crashed ? 'ぶつかった…' : '落ちた…';
     document.getElementById('over-score').textContent = `${piece.name}　${dist} m`;
     document.getElementById('over-best').textContent = isBest ? '★ 自己ベスト更新！' : `ベスト ${best} m`;
     overEl.classList.remove('hidden');
@@ -155,9 +218,17 @@
     selectEl.classList.remove('hidden');
   }
 
+  function crash() {
+    const p = player;
+    p.crashed = 1;
+    p.vy = -6;
+    p.onGround = false;
+    puff(PLAYER_X + PIECE_W / 2, p.y - PIECE_H / 2, 12);
+  }
+
   function tryJump() {
     const p = player;
-    if (p.falling) return false;
+    if (p.falling || p.crashed) return false;
     if (p.onGround || p.coyote > 0) {
       p.vy = -piece.jumpPower;
       p.jumpsUsed = 1;
@@ -183,47 +254,76 @@
     frame++;
     if (state !== 'playing') { updateParticles(); return; }
 
-    speed = Math.min(MAX_SPEED, BASE_SPEED + camera * SPEED_UP);
+    const p = player;
+
+    if (p.crashed) {
+      // 激突：その場で跳ね返って落ちる
+      p.vy += piece.gravity;
+      p.y += p.vy;
+      p.angle -= 0.15;
+      updateParticles();
+      if (++p.crashed > CRASH_FRAMES) gameOver();
+      return;
+    }
+
+    speed = speedAt(camera);
+    const prevFront = camera + PLAYER_X + PIECE_W / 2 - 4;
     camera += speed;
     generate();
 
-    const p = player;
+    // 段差の壁・穴の向こう岸の壁に正面からぶつかったか
+    const front = camera + PLAYER_X + PIECE_W / 2 - 4;
+    for (const s of segments) {
+      if (s.type === 'road' && s.x > prevFront && s.x <= front && p.y > s.y0 + WALL_TOL) {
+        crash();
+        return;
+      }
+    }
 
     if (input.jumpBuffer > 0) {
       if (tryJump()) input.jumpBuffer = 0;
       else input.jumpBuffer--;
     }
 
+    const surf = surfaceUnder();
+    if (p.onGround) {
+      if (surf !== null && surf - p.y <= SNAP) {
+        p.y = surf;
+      } else {
+        // 道の端・下り段差から踏み外した
+        p.onGround = false;
+        p.coyote = COYOTE_FRAMES;
+      }
+    }
     if (!p.onGround) {
       let g = piece.gravity;
       if (p.vy < 0 && !input.jumpHeld) g *= CUT_GRAVITY;
       else if (p.vy > 0 && input.jumpHeld && p.floatLeft > 0) { g *= FLOAT_GRAVITY; p.floatLeft--; }
       p.vy += g;
       const ny = p.y + p.vy;
-      const onRoad = supported();
-      if (!p.falling && p.vy >= 0 && p.y <= GROUND_Y && ny >= GROUND_Y && onRoad) {
-        // 着地
-        p.y = GROUND_Y;
+      if (!p.falling && surf !== null && ny >= surf && p.y <= surf + LAND_TOL && p.vy > -2) {
+        // 着地（上り坂が下から迫ってきた場合も含む）
+        p.y = surf;
         p.vy = 0;
         p.onGround = true;
         p.jumpsUsed = 0;
-        puff(PLAYER_X, GROUND_Y, 5);
+        puff(PLAYER_X, surf, 5);
+      } else if (!p.falling && surf !== null && ny > surf + LAND_TOL) {
+        // 地面にめり込んだ＝壁に激突
+        crash();
+        return;
       } else {
         p.y = ny;
-        if (p.y > GROUND_Y + 2 && p.coyote === 0) p.falling = true;  // 道より下に落ちたらもう戻れない
+        if (p.y > Y_BOT + 2 && p.coyote === 0) p.falling = true;  // どの道よりも下に落ちたらもう戻れない
       }
       if (p.coyote > 0 && --p.coyote === 0) p.jumpsUsed = Math.max(p.jumpsUsed, 1);
-    } else if (!supported()) {
-      // 道の端から踏み外した
-      p.onGround = false;
-      p.coyote = COYOTE_FRAMES;
     }
 
     // 見た目の傾き
     const target = p.falling ? 1.2 : p.onGround ? 0 : Math.max(-0.35, Math.min(0.35, p.vy * 0.03));
     p.angle += (target - p.angle) * 0.2;
 
-    if (p.onGround && frame % 6 === 0) puff(PLAYER_X - PIECE_W / 2, GROUND_Y, 1);
+    if (p.onGround && frame % 6 === 0) puff(PLAYER_X - PIECE_W / 2, p.y, 1);
 
     updateParticles();
 
@@ -259,13 +359,6 @@
     // 遠くの山（視差スクロール）
     drawHills(camera * 0.1, 300, 70, 0.0045, 'rgba(120, 82, 60, 0.35)');
     drawHills(camera * 0.25, 340, 50, 0.008, 'rgba(95, 62, 42, 0.45)');
-
-    // 穴の底（闇）
-    const pit = ctx.createLinearGradient(0, GROUND_Y, 0, H);
-    pit.addColorStop(0, '#2a1a10');
-    pit.addColorStop(1, '#0a0604');
-    ctx.fillStyle = pit;
-    ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
   }
 
   function drawHills(offset, baseY, amp, freq, color) {
@@ -283,32 +376,60 @@
 
   function drawRoad() {
     for (const s of segments) {
-      if (s.type !== 'road') continue;
       const x = s.x - camera;
       if (x > W || x + s.w < 0) continue;
-      // 将棋盤風の道
+      if (s.type === 'hole') {
+        // 穴（谷底の闇）
+        const top = Math.min(s.prevY, s.nextY) + 20;
+        const pit = ctx.createLinearGradient(0, top, 0, H);
+        pit.addColorStop(0, 'rgba(42, 26, 16, 0)');
+        pit.addColorStop(0.3, '#2a1a10');
+        pit.addColorStop(1, '#0a0604');
+        ctx.fillStyle = pit;
+        ctx.fillRect(x - 1, top, s.w + 2, H - top);
+        continue;
+      }
+      // 将棋盤風の道（坂は台形になる）
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(x, s.y0);
+      ctx.lineTo(x + s.w, s.y1);
+      ctx.lineTo(x + s.w, H + 10);
+      ctx.lineTo(x, H + 10);
+      ctx.closePath();
       ctx.fillStyle = '#d9a85b';
-      ctx.fillRect(x, GROUND_Y, s.w, H - GROUND_Y);
-      ctx.fillStyle = '#c18f45';
-      ctx.fillRect(x, GROUND_Y, s.w, 6);
+      ctx.fill();
+      ctx.clip();
       ctx.strokeStyle = 'rgba(60, 30, 5, 0.55)';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       const start = Math.ceil(s.x / BOARD_CELL) * BOARD_CELL;
       for (let gx = start; gx < s.x + s.w; gx += BOARD_CELL) {
         const sx = gx - camera;
-        ctx.moveTo(sx, GROUND_Y + 6);
+        ctx.moveTo(sx, Y_TOP);
         ctx.lineTo(sx, H);
       }
-      for (let gy = GROUND_Y + 6 + BOARD_CELL; gy < H; gy += BOARD_CELL) {
+      for (let gy = Y_TOP + BOARD_CELL; gy < H; gy += BOARD_CELL) {
         ctx.moveTo(x, gy);
         ctx.lineTo(x + s.w, gy);
       }
       ctx.stroke();
-      // 縁取り
+      ctx.restore();
+      // 路面と縁取り
+      ctx.strokeStyle = '#c18f45';
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.moveTo(x, s.y0 + 3);
+      ctx.lineTo(x + s.w, s.y1 + 3);
+      ctx.stroke();
       ctx.strokeStyle = '#6b3d14';
       ctx.lineWidth = 3;
-      ctx.strokeRect(x + 1.5, GROUND_Y + 1.5, s.w - 3, H - GROUND_Y + 10);
+      ctx.beginPath();
+      ctx.moveTo(x + 1.5, H + 10);
+      ctx.lineTo(x + 1.5, s.y0 + 1.5);
+      ctx.lineTo(x + s.w - 1.5, s.y1 + 1.5);
+      ctx.lineTo(x + s.w - 1.5, H + 10);
+      ctx.stroke();
     }
   }
 
